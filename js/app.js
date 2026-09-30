@@ -1,11 +1,10 @@
-// Control de Paneles Solares — datos guardados en localStorage del navegador
-const KEY_DATA = 'solar_lecturas';
-const KEY_CFG = 'solar_config';
-const KEY_EMP = 'solar_empresas';
-const KEY_SUC = 'solar_sucursales';
-const KEY_PREFS = 'solar_prefs';
+// Control de Paneles Solares — datos en Supabase (tablas solar_*), preferencias de tema en localStorage
+const SUPABASE_URL = 'https://mhmqgjgfkcrgbtrhmtqw.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_up1bYZnUEh0JxdhfBIRTUQ_FO2jrb4X'; // llave pública; el acceso lo controla RLS
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
-const DEFAULT_CFG = { tarifa: 0.15, moneda: 'USD', co2: 0.45 };
+const KEY_PREFS = 'solar_prefs';
+const DEFAULT_CFG = { tarifa: 0.15, moneda: 'MXN', co2: 0.45 };
 const DEFAULT_SUC = { paneles: 10, watts: 450, hsp: 5 };
 const PALETA = ['#f59e0b', '#3b82f6', '#10b981', '#8b5cf6', '#ec4899', '#06b6d4', '#ef4444', '#84cc16', '#f97316', '#6366f1'];
 const TEMAS = ['auto', 'light', 'dark'];
@@ -14,65 +13,113 @@ const TEMA_INFO = { auto: ['🖥️', 'automático'], light: ['☀️', 'claro']
 const $ = (id) => document.getElementById(id);
 const charts = {};
 
-// ---------- Almacenamiento ----------
-function load(key, fallback) {
-  try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; }
-}
-function save(key, val) {
-  try { localStorage.setItem(key, JSON.stringify(val)); } catch { toast('No se pudo guardar'); }
-}
-let lecturas = load(KEY_DATA, []);
-let empresas = load(KEY_EMP, []);
-let sucursales = load(KEY_SUC, []);
-let cfg = { ...DEFAULT_CFG, ...load(KEY_CFG, {}) };
-let prefs = { tema: 'auto', acento: 'solar', ...load(KEY_PREFS, {}) };
+let lecturas = [];
+let empresas = [];
+let sucursales = [];
+let cfg = { ...DEFAULT_CFG };
+let usuarioId = null;
 
-function saveAll() {
-  save(KEY_DATA, lecturas);
-  save(KEY_EMP, empresas);
-  save(KEY_SUC, sucursales);
+// ---------- Preferencias locales ----------
+function loadPrefs() {
+  try { return JSON.parse(localStorage.getItem(KEY_PREFS)) || {}; } catch { return {}; }
+}
+let prefs = { tema: 'auto', acento: 'solar', ...loadPrefs() };
+function savePrefs() {
+  try { localStorage.setItem(KEY_PREFS, JSON.stringify(prefs)); } catch { /* sin almacenamiento */ }
 }
 
-const uid = () => crypto.randomUUID();
+// ---------- Capa de datos (Supabase) ----------
+const aEmpresa = (r) => ({ id: r.id, nombre: r.nombre, rfc: r.rfc || '' });
+const aSucursal = (r) => ({
+  id: r.id, empresaId: r.empresa_id, nombre: r.nombre, ubicacion: r.ubicacion || '',
+  paneles: +r.paneles, watts: +r.watts, hsp: +r.hsp,
+});
+const aLectura = (r) => ({
+  id: r.id, sucursalId: r.sucursal_id, fecha: r.fecha, generada: +r.generada_kwh, consumida: +r.consumida_kwh,
+  hsp: r.hsp == null ? null : +r.hsp, clima: r.clima, notas: r.notas || '',
+});
+const deSucursal = (s) => ({
+  empresa_id: s.empresaId, nombre: s.nombre, ubicacion: s.ubicacion || null,
+  paneles: s.paneles, watts: s.watts, hsp: s.hsp,
+});
+const deLectura = (l) => ({
+  sucursal_id: l.sucursalId, fecha: l.fecha, generada_kwh: l.generada, consumida_kwh: l.consumida,
+  hsp: l.hsp, clima: l.clima, notas: l.notas || null,
+});
 
-// Lecturas de la versión anterior (sin sucursal) pasan a una sucursal "Principal"
-function migrar() {
-  const huerfanas = lecturas.filter((l) => !l.sucursalId);
-  if (!huerfanas.length) return;
-  const suc = sucursales[0] || asegurarSucursal('Mi empresa', cfg.nombre || 'Principal', {
-    paneles: cfg.paneles, watts: cfg.watts, hsp: cfg.hsp,
-  });
-  huerfanas.forEach((l) => { l.sucursalId = suc.id; });
-  saveAll();
+function ok({ data, error }) {
+  if (error) throw error;
+  return data;
 }
 
-// ---------- Entidades ----------
+function mensajeError(err) {
+  if (err?.code === '23505') return 'Ya existe un registro con ese nombre';
+  if (err?.code === '23514') return 'Hay un valor fuera de rango';
+  if (err?.code === '42501' || err?.status === 401) return 'Sesión expirada: vuelve a iniciar sesión';
+  return err?.message || 'Error inesperado';
+}
+
+// Ejecuta una acción asíncrona mostrando errores en un aviso
+async function intentar(fn, boton) {
+  if (boton) boton.disabled = true;
+  try {
+    return await fn();
+  } catch (err) {
+    console.error(err);
+    toast(mensajeError(err));
+  } finally {
+    if (boton) boton.disabled = false;
+  }
+}
+
+async function todas(tabla, ...orden) {
+  const out = [];
+  const paso = 1000;
+  for (let desde = 0; ; desde += paso) {
+    let q = sb.from(tabla).select('*');
+    orden.forEach((c) => { q = q.order(c); });
+    const data = ok(await q.range(desde, desde + paso - 1));
+    out.push(...data);
+    if (data.length < paso) return out;
+  }
+}
+
+async function cargarDatos() {
+  const [e, s, l, c] = await Promise.all([
+    todas('solar_empresas', 'nombre', 'id'),
+    todas('solar_sucursales', 'nombre', 'id'),
+    todas('solar_lecturas', 'fecha', 'id'),
+    sb.from('solar_config').select('*').eq('id', 1).maybeSingle().then(ok),
+  ]);
+  empresas = e.map(aEmpresa);
+  sucursales = s.map(aSucursal);
+  lecturas = l.map(aLectura);
+  cfg = c ? { tarifa: +c.tarifa, moneda: c.moneda, co2: +c.co2 } : { ...DEFAULT_CFG };
+}
+
+// Busca por nombre (sin distinguir mayúsculas) o crea la razón social / sucursal en la base
+async function asegurarSucursal(empNombre, sucNombre) {
+  const igual = (a, b) => a.trim().toLowerCase() === b.trim().toLowerCase();
+  let emp = empresas.find((e) => igual(e.nombre, empNombre));
+  if (!emp) {
+    emp = aEmpresa(ok(await sb.from('solar_empresas').insert({ nombre: empNombre.trim() }).select().single()));
+    empresas.push(emp);
+  }
+  let suc = sucursales.find((s) => s.empresaId === emp.id && igual(s.nombre, sucNombre));
+  if (!suc) {
+    const fila = deSucursal({ empresaId: emp.id, nombre: sucNombre.trim(), ...DEFAULT_SUC });
+    suc = aSucursal(ok(await sb.from('solar_sucursales').insert(fila).select().single()));
+    sucursales.push(suc);
+  }
+  return suc;
+}
+
+// ---------- Entidades y cálculos ----------
 const empById = (id) => empresas.find((e) => e.id === id);
 const sucById = (id) => sucursales.find((s) => s.id === id);
 const kwp = (s) => (s ? (s.paneles * s.watts) / 1000 : 0);
 const colorSuc = (id) => PALETA[Math.max(0, sucursales.findIndex((s) => s.id === id)) % PALETA.length];
 const colorEmp = (id) => PALETA[(Math.max(0, empresas.findIndex((e) => e.id === id)) + 3) % PALETA.length];
-
-// Busca por nombre (sin distinguir mayúsculas) o crea la razón social / sucursal
-function asegurarSucursal(empNombre, sucNombre, datos = {}) {
-  const igual = (a, b) => a.trim().toLowerCase() === b.trim().toLowerCase();
-  let emp = empresas.find((e) => igual(e.nombre, empNombre));
-  if (!emp) {
-    emp = { id: uid(), nombre: empNombre.trim(), rfc: datos.rfc || '' };
-    empresas.push(emp);
-  }
-  let suc = sucursales.find((s) => s.empresaId === emp.id && igual(s.nombre, sucNombre));
-  if (!suc) {
-    suc = {
-      id: uid(), empresaId: emp.id, nombre: sucNombre.trim(), ubicacion: datos.ubicacion || '',
-      paneles: datos.paneles || DEFAULT_SUC.paneles,
-      watts: datos.watts || DEFAULT_SUC.watts,
-      hsp: datos.hsp || DEFAULT_SUC.hsp,
-    };
-    sucursales.push(suc);
-  }
-  return suc;
-}
 
 // Energía teórica = kWp × HSP; Performance Ratio = real / teórica
 function teorica(l) {
@@ -99,7 +146,7 @@ function toast(msg) {
   t.textContent = msg;
   t.classList.add('show');
   clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => t.classList.remove('show'), 2200);
+  toast.timer = setTimeout(() => t.classList.remove('show'), 2600);
 }
 
 function agrupar(data, keyFn) {
@@ -116,6 +163,63 @@ function agrupar(data, keyFn) {
 }
 const prDe = (g) => (g.teo > 0 ? (g.gen / g.teo) * 100 : 0);
 
+// ---------- Sesión ----------
+function mostrarLogin() {
+  usuarioId = null;
+  empresas = []; sucursales = []; lecturas = [];
+  $('loader').hidden = true;
+  $('app').hidden = true;
+  $('login').hidden = false;
+  $('loginEmail').focus();
+}
+
+async function entrar(session) {
+  if (usuarioId === session.user.id) return; // renovación de token
+  usuarioId = session.user.id;
+  $('login').hidden = true;
+  $('loader').hidden = false;
+  try {
+    await cargarDatos();
+  } catch (err) {
+    console.error(err);
+    toast(mensajeError(err));
+  }
+  $('usuario').textContent = session.user.email;
+  $('loader').hidden = true;
+  $('app').hidden = false;
+  fillConfig();
+  resetForm();
+  showView('dashboard');
+}
+
+$('formLogin').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  $('loginError').hidden = true;
+  $('loginBtn').disabled = true;
+  const { error } = await sb.auth.signInWithPassword({
+    email: $('loginEmail').value.trim(),
+    password: $('loginPass').value,
+  });
+  $('loginBtn').disabled = false;
+  if (error) {
+    $('loginError').textContent = error.message === 'Invalid login credentials'
+      ? 'Correo o contraseña incorrectos' : error.message;
+    $('loginError').hidden = false;
+  } else {
+    $('loginPass').value = '';
+  }
+});
+
+$('btnSalir').addEventListener('click', () => sb.auth.signOut());
+
+sb.auth.onAuthStateChange((evento, session) => {
+  // Diferido: no se deben esperar llamadas a Supabase dentro de este callback
+  setTimeout(() => {
+    if (session) entrar(session);
+    else mostrarLogin();
+  }, 0);
+});
+
 // ---------- Tema claro / oscuro y paleta ----------
 function aplicarTema() {
   const root = document.documentElement;
@@ -129,19 +233,19 @@ function aplicarTema() {
     Chart.defaults.color = css('--muted');
     Chart.defaults.borderColor = css('--border');
   }
-  if ($('dashboard').classList.contains('active')) renderDashboard();
+  if (!$('app').hidden && $('dashboard').classList.contains('active')) renderDashboard();
 }
 
 $('btnTema').addEventListener('click', () => {
   prefs.tema = TEMAS[(TEMAS.indexOf(prefs.tema) + 1) % TEMAS.length];
-  save(KEY_PREFS, prefs);
+  savePrefs();
   aplicarTema();
   toast(`Modo ${TEMA_INFO[prefs.tema][1]}`);
 });
 
 document.querySelectorAll('.swatches button').forEach((b) => b.addEventListener('click', () => {
   prefs.acento = b.dataset.accent;
-  save(KEY_PREFS, prefs);
+  savePrefs();
   $('palette').open = false;
   aplicarTema();
 }));
@@ -354,7 +458,7 @@ function renderAlertas(data) {
   if (!data.length) {
     msgs.push(sucursales.length
       ? 'No hay lecturas para este filtro. Ve a <b>Registro</b> para capturar una.'
-      : 'Empieza en <b>Empresas</b>: registra una razón social y sus sucursales, o carga los datos de ejemplo.');
+      : 'Empieza en <b>Empresas</b>: registra una razón social y sus sucursales.');
   }
   const porSuc = {};
   data.forEach((l) => (porSuc[l.sucursalId] ??= []).push(l));
@@ -376,14 +480,12 @@ function renderAlertas(data) {
 }
 
 // ---------- Registro ----------
-$('fecha').value = hoy();
-
 $('formLectura').addEventListener('submit', (e) => {
   e.preventDefault();
   const sucursalId = $('regSucursal').value;
   if (!sucursalId) { toast('Selecciona una sucursal'); return; }
+  const id = $('editId').value;
   const item = {
-    id: $('editId').value || uid(),
     sucursalId,
     fecha: $('fecha').value,
     generada: parseFloat($('generada').value),
@@ -392,13 +494,19 @@ $('formLectura').addEventListener('submit', (e) => {
     clima: $('clima').value,
     notas: $('notas').value.trim(),
   };
-  const idx = lecturas.findIndex((l) => l.id === item.id);
-  const dup = lecturas.find((l) => l.fecha === item.fecha && l.sucursalId === sucursalId && l.id !== item.id);
+  const dup = lecturas.find((l) => l.fecha === item.fecha && l.sucursalId === sucursalId && l.id !== id);
   if (dup && !confirm(`Ya existe una lectura de ${sucById(sucursalId).nombre} para ${item.fecha}. ¿Guardar otra de todos modos?`)) return;
-  if (idx >= 0) lecturas[idx] = item; else lecturas.push(item);
-  save(KEY_DATA, lecturas);
-  toast(idx >= 0 ? 'Lectura actualizada' : 'Lectura guardada');
-  resetForm();
+  intentar(async () => {
+    if (id) {
+      const r = aLectura(ok(await sb.from('solar_lecturas').update(deLectura(item)).eq('id', id).select().single()));
+      lecturas[lecturas.findIndex((l) => l.id === id)] = r;
+      toast('Lectura actualizada');
+    } else {
+      lecturas.push(aLectura(ok(await sb.from('solar_lecturas').insert(deLectura(item)).select().single())));
+      toast('Lectura guardada');
+    }
+    resetForm();
+  }, e.submitter);
 });
 
 $('cancelEdit').addEventListener('click', resetForm);
@@ -434,12 +542,14 @@ function editar(id) {
   $('cancelEdit').hidden = false;
 }
 
-function eliminar(id) {
+function eliminar(id, boton) {
   if (!confirm('¿Eliminar esta lectura?')) return;
-  lecturas = lecturas.filter((l) => l.id !== id);
-  save(KEY_DATA, lecturas);
-  renderTabla();
-  toast('Lectura eliminada');
+  intentar(async () => {
+    ok(await sb.from('solar_lecturas').delete().eq('id', id));
+    lecturas = lecturas.filter((l) => l.id !== id);
+    renderTabla();
+    toast('Lectura eliminada');
+  }, boton);
 }
 
 // ---------- Historial ----------
@@ -466,10 +576,11 @@ $('tbody').addEventListener('click', (e) => {
   const t = e.target.closest('button');
   if (!t) return;
   if (t.dataset.edit) editar(t.dataset.edit);
-  if (t.dataset.del) eliminar(t.dataset.del);
+  if (t.dataset.del) eliminar(t.dataset.del, t);
 });
 
 // ---------- CSV ----------
+const CLIMAS = ['Soleado', 'Parcialmente nublado', 'Nublado', 'Lluvioso'];
 const csvCell = (v) => (/[",\n\r]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v));
 
 function parseCSV(text) {
@@ -511,31 +622,38 @@ $('fileImport').addEventListener('change', async (e) => {
   const file = e.target.files[0];
   if (!file) return;
   const [head = [], ...body] = parseCSV((await file.text()).replace(/^﻿/, ''));
+  e.target.value = '';
   const idx = (n) => head.findIndex((h) => h.trim().toLowerCase() === n);
   const c = {
     f: idx('fecha'), e: idx('razon_social'), s: idx('sucursal'), g: idx('generada_kwh'),
     con: idx('consumida_kwh'), h: idx('hsp'), cl: idx('clima'), n: idx('notas'),
   };
-  if (c.f < 0 || c.g < 0 || c.con < 0) { toast('CSV no válido: faltan columnas'); e.target.value = ''; return; }
-  // CSV sin razón social/sucursal (formato anterior): usa la sucursal filtrada o la primera
-  const porDefecto = () => sucById($('fSucursal').value) || sucursales[0] || asegurarSucursal('Mi empresa', 'Principal');
-  let n = 0;
-  body.forEach((r) => {
-    const empN = (r[c.e] || '').trim(), sucN = (r[c.s] || '').trim();
-    const suc = empN || sucN ? asegurarSucursal(empN || 'Mi empresa', sucN || 'Principal') : porDefecto();
-    const generada = parseFloat(r[c.g]), consumida = parseFloat(r[c.con]);
-    if (!r[c.f] || isNaN(generada) || isNaN(consumida)) return;
-    lecturas.push({
-      id: uid(), sucursalId: suc.id, fecha: r[c.f].trim(), generada, consumida,
-      hsp: parseFloat(r[c.h]) || null, clima: (r[c.cl] || 'Soleado').trim(), notas: (r[c.n] || '').trim(),
-    });
-    n++;
+  if (c.f < 0 || c.g < 0 || c.con < 0) { toast('CSV no válido: faltan columnas'); return; }
+  toast('Importando…');
+  await intentar(async () => {
+    const nuevas = [];
+    for (const r of body) {
+      const generada = parseFloat(r[c.g]), consumida = parseFloat(r[c.con]);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test((r[c.f] || '').trim()) || isNaN(generada) || isNaN(consumida)) continue;
+      const empN = (r[c.e] || '').trim(), sucN = (r[c.s] || '').trim();
+      // Sin razón social/sucursal: usa la sucursal filtrada o la primera
+      const suc = empN || sucN
+        ? await asegurarSucursal(empN || 'Mi empresa', sucN || 'Principal')
+        : sucById($('fSucursal').value) || sucursales[0] || await asegurarSucursal('Mi empresa', 'Principal');
+      const clima = (r[c.cl] || '').trim();
+      nuevas.push(deLectura({
+        sucursalId: suc.id, fecha: r[c.f].trim(), generada, consumida,
+        hsp: parseFloat(r[c.h]) || null, clima: CLIMAS.includes(clima) ? clima : 'Soleado', notas: (r[c.n] || '').trim(),
+      }));
+    }
+    for (let i = 0; i < nuevas.length; i += 500) {
+      const data = ok(await sb.from('solar_lecturas').insert(nuevas.slice(i, i + 500)).select());
+      lecturas.push(...data.map(aLectura));
+    }
+    refrescarSelects();
+    renderTabla();
+    toast(`${nuevas.length} lecturas importadas`);
   });
-  saveAll();
-  refrescarSelects();
-  renderTabla();
-  toast(`${n} lecturas importadas`);
-  e.target.value = '';
 });
 
 // ---------- Empresas y sucursales ----------
@@ -562,18 +680,18 @@ function renderEmpresas() {
 $('formEmpresa').addEventListener('submit', (e) => {
   e.preventDefault();
   const id = $('empId').value;
-  const datos = { nombre: $('empNombre').value.trim(), rfc: $('empRfc').value.trim() };
-  if (empresas.some((x) => x.id !== id && x.nombre.toLowerCase() === datos.nombre.toLowerCase())) {
-    toast('Ya existe esa razón social');
-    return;
-  }
-  if (id) Object.assign(empById(id), datos);
-  else empresas.push({ id: uid(), ...datos });
-  save(KEY_EMP, empresas);
-  toast(id ? 'Razón social actualizada' : 'Razón social registrada');
-  resetEmpresa();
-  refrescarSelects();
-  renderEmpresas();
+  const datos = { nombre: $('empNombre').value.trim(), rfc: $('empRfc').value.trim() || null };
+  intentar(async () => {
+    if (id) {
+      Object.assign(empById(id), aEmpresa(ok(await sb.from('solar_empresas').update(datos).eq('id', id).select().single())));
+    } else {
+      empresas.push(aEmpresa(ok(await sb.from('solar_empresas').insert(datos).select().single())));
+    }
+    toast(id ? 'Razón social actualizada' : 'Razón social registrada');
+    resetEmpresa();
+    refrescarSelects();
+    renderEmpresas();
+  }, e.submitter);
 });
 function resetEmpresa() {
   $('formEmpresa').reset();
@@ -595,13 +713,17 @@ $('formSucursal').addEventListener('submit', (e) => {
     watts: +$('sucWatts').value || DEFAULT_SUC.watts,
     hsp: +$('sucHsp').value || DEFAULT_SUC.hsp,
   };
-  if (id) Object.assign(sucById(id), datos);
-  else sucursales.push({ id: uid(), ...datos });
-  save(KEY_SUC, sucursales);
-  toast(id ? 'Sucursal actualizada' : 'Sucursal registrada');
-  resetSucursal();
-  refrescarSelects();
-  renderEmpresas();
+  intentar(async () => {
+    if (id) {
+      Object.assign(sucById(id), aSucursal(ok(await sb.from('solar_sucursales').update(deSucursal(datos)).eq('id', id).select().single())));
+    } else {
+      sucursales.push(aSucursal(ok(await sb.from('solar_sucursales').insert(deSucursal(datos)).select().single())));
+    }
+    toast(id ? 'Sucursal actualizada' : 'Sucursal registrada');
+    resetSucursal();
+    refrescarSelects();
+    renderEmpresas();
+  }, e.submitter);
 });
 function resetSucursal() {
   const emp = $('sucEmpresa').value;
@@ -637,11 +759,15 @@ $('empresas').addEventListener('click', (e) => {
     const sucs = sucursales.filter((s) => s.empresaId === x.id).map((s) => s.id);
     const nLect = lecturas.filter((l) => sucs.includes(l.sucursalId)).length;
     if (!confirm(`¿Eliminar "${x.nombre}"?${sucs.length ? ` También se eliminarán ${sucs.length} sucursal(es) y ${nLect} lectura(s).` : ''}`)) return;
-    empresas = empresas.filter((y) => y.id !== x.id);
-    sucursales = sucursales.filter((s) => !sucs.includes(s.id));
-    lecturas = lecturas.filter((l) => !sucs.includes(l.sucursalId));
-    saveAll();
-    toast('Razón social eliminada');
+    intentar(async () => {
+      ok(await sb.from('solar_empresas').delete().eq('id', x.id)); // cascada en la base
+      empresas = empresas.filter((y) => y.id !== x.id);
+      sucursales = sucursales.filter((s) => !sucs.includes(s.id));
+      lecturas = lecturas.filter((l) => !sucs.includes(l.sucursalId));
+      toast('Razón social eliminada');
+      refrescarSelects();
+      renderEmpresas();
+    }, b);
   }
   if (d.sucEdit) {
     const s = sucById(d.sucEdit);
@@ -661,12 +787,15 @@ $('empresas').addEventListener('click', (e) => {
     const s = sucById(d.sucDel);
     const nLect = lecturas.filter((l) => l.sucursalId === s.id).length;
     if (!confirm(`¿Eliminar la sucursal "${s.nombre}"?${nLect ? ` También se eliminarán ${nLect} lectura(s).` : ''}`)) return;
-    sucursales = sucursales.filter((y) => y.id !== s.id);
-    lecturas = lecturas.filter((l) => l.sucursalId !== s.id);
-    saveAll();
-    toast('Sucursal eliminada');
+    intentar(async () => {
+      ok(await sb.from('solar_sucursales').delete().eq('id', s.id));
+      sucursales = sucursales.filter((y) => y.id !== s.id);
+      lecturas = lecturas.filter((l) => l.sucursalId !== s.id);
+      toast('Sucursal eliminada');
+      refrescarSelects();
+      renderEmpresas();
+    }, b);
   }
-  if (d.empDel || d.sucDel) { refrescarSelects(); renderEmpresas(); }
 });
 
 // ---------- Parámetros generales ----------
@@ -678,82 +807,34 @@ function fillConfig() {
 
 $('formConfig').addEventListener('submit', (e) => {
   e.preventDefault();
-  cfg = {
+  const nuevo = {
     tarifa: +$('cfgTarifa').value || 0,
-    moneda: $('cfgMoneda').value.trim() || 'USD',
+    moneda: $('cfgMoneda').value.trim() || 'MXN',
     co2: +$('cfgCO2').value || 0,
   };
-  save(KEY_CFG, cfg);
-  toast('Parámetros guardados');
+  intentar(async () => {
+    ok(await sb.from('solar_config').update(nuevo).eq('id', 1));
+    cfg = nuevo;
+    toast('Parámetros guardados');
+  }, e.submitter);
 });
 
-$('btnReset').addEventListener('click', () => {
-  if (!confirm('Se borrarán todas las razones sociales, sucursales y lecturas. Exporta un CSV antes si quieres conservarlas. ¿Continuar?')) return;
-  lecturas = []; empresas = []; sucursales = [];
-  saveAll();
-  refrescarSelects();
-  renderEmpresas();
-  toast('Datos borrados');
+$('btnReset').addEventListener('click', (e) => {
+  const texto = prompt('Se borrarán TODAS las razones sociales, sucursales y lecturas de la base de datos para todos los usuarios.\nEscribe BORRAR para confirmar:');
+  if (texto !== 'BORRAR') return;
+  intentar(async () => {
+    ok(await sb.from('solar_empresas').delete().not('id', 'is', null)); // cascada a sucursales y lecturas
+    lecturas = []; empresas = []; sucursales = [];
+    refrescarSelects();
+    renderEmpresas();
+    toast('Datos borrados');
+  }, e.currentTarget);
 });
-
-// ---------- Datos de ejemplo ----------
-const DEMO = [
-  { emp: 'Energía Verde del Norte S.A. de C.V.', rfc: 'EVN120315AB1', suc: 'Monterrey Centro', ubicacion: 'Monterrey, N.L.', paneles: 24, watts: 550, hsp: 5.6, consumo: 42 },
-  { emp: 'Energía Verde del Norte S.A. de C.V.', rfc: 'EVN120315AB1', suc: 'Saltillo', ubicacion: 'Saltillo, Coah.', paneles: 12, watts: 450, hsp: 5.8, consumo: 20 },
-  { emp: 'Comercializadora Solar del Bajío S.A.', rfc: 'CSB180722XY9', suc: 'León', ubicacion: 'León, Gto.', paneles: 16, watts: 500, hsp: 5.4, consumo: 30, sucia: true },
-  { emp: 'Comercializadora Solar del Bajío S.A.', rfc: 'CSB180722XY9', suc: 'Querétaro', ubicacion: 'Querétaro, Qro.', paneles: 8, watts: 450, hsp: 5.3, consumo: 22 },
-];
-
-$('btnDemo').addEventListener('click', () => {
-  if (lecturas.length && !confirm('Se agregarán 2 razones sociales, 4 sucursales y 90 días de lecturas de ejemplo. ¿Continuar?')) return;
-  const climas = generarClimas(90);
-  DEMO.forEach((d) => {
-    const suc = asegurarSucursal(d.emp, d.suc, d);
-    lecturas = lecturas.concat(generarDemo(suc, climas, d.consumo, d.sucia));
-  });
-  saveAll();
-  toast('Datos de ejemplo cargados');
-  $('fEmpresa').value = '';
-  showView('dashboard');
-});
-
-function generarClimas(dias) {
-  const tipos = [
-    { c: 'Soleado', f: [0.95, 1.1], p: 0.55 },
-    { c: 'Parcialmente nublado', f: [0.65, 0.85], p: 0.25 },
-    { c: 'Nublado', f: [0.3, 0.55], p: 0.13 },
-    { c: 'Lluvioso', f: [0.1, 0.3], p: 0.07 },
-  ];
-  return Array.from({ length: dias }, () => {
-    let r = Math.random();
-    return tipos.find((t) => (r -= t.p) <= 0) || tipos[0];
-  });
-}
-
-function generarDemo(suc, climas, consumoBase, sucia) {
-  const out = [];
-  const dias = climas.length;
-  for (let i = dias - 1; i >= 0; i--) {
-    const d = new Date();
-    d.setDate(d.getDate() - i);
-    const cl = climas[i];
-    const hsp = +(suc.hsp * (cl.f[0] + Math.random() * (cl.f[1] - cl.f[0]))).toFixed(1);
-    const eficiencia = sucia && i < 20 && i > 3 ? 0.55 : 0.82; // simula paneles sucios
-    const generada = +(kwp(suc) * hsp * (eficiencia + Math.random() * 0.06)).toFixed(2);
-    const finde = [0, 6].includes(d.getDay());
-    const consumida = +(consumoBase * (finde ? 0.7 : 1) * (0.85 + Math.random() * 0.3)).toFixed(2);
-    out.push({
-      id: uid(), sucursalId: suc.id, fecha: fechaLocal(d), generada, consumida, hsp, clima: cl.c,
-      notas: sucia && i === 3 ? 'Limpieza de paneles' : '',
-    });
-  }
-  return out;
-}
 
 // ---------- Inicio ----------
-migrar();
-fillConfig();
-refrescarSelects();
+// Limpia los datos que la versión anterior guardaba en el navegador
+try {
+  ['solar_lecturas', 'solar_empresas', 'solar_sucursales', 'solar_config'].forEach((k) => localStorage.removeItem(k));
+} catch { /* sin almacenamiento */ }
 actualizarKwp();
 aplicarTema();
-showView('dashboard');

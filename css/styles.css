@@ -177,3 +177,31 @@ td.neg { color: var(--red); font-weight: 600; }
   .kpi strong { font-size: 1.4rem; }
   .topbar { padding: 12px 16px; }
 }
+
+/* ---------- Login y carga ---------- */
+.login {
+  min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 16px;
+  background:
+    radial-gradient(circle at 20% 20%, color-mix(in srgb, var(--primary) 25%, transparent), transparent 55%),
+    radial-gradient(circle at 80% 80%, color-mix(in srgb, var(--primary-2) 22%, transparent), transparent 55%),
+    var(--bg);
+}
+.login[hidden], #app[hidden] { display: none; }
+.login-card { width: 100%; max-width: 380px; text-align: center; box-shadow: var(--shadow); padding: 28px; }
+.login-card h2 { margin: 6px 0 4px; font-size: 1.25rem; }
+.login-card form { text-align: left; margin-top: 18px; }
+.login-icon {
+  width: 56px; height: 56px; margin: 0 auto; border-radius: 16px; font-size: 1.8rem;
+  display: flex; align-items: center; justify-content: center;
+  background: linear-gradient(135deg, var(--primary), var(--primary-2));
+}
+.btn.block { width: 100%; padding: 11px; }
+.btn:disabled { opacity: .6; cursor: wait; }
+.error { color: var(--red); font-size: .88rem; margin: 10px 0 0; }
+.usuario { font-size: .82rem; opacity: .9; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.loader {
+  position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+  background: var(--bg); color: var(--muted); font-weight: 600; z-index: 40;
+}
+.loader[hidden] { display: none; }
+@media (max-width: 600px) { .usuario { display: none; } }

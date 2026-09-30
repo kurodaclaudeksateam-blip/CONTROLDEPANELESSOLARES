@@ -1,7 +1,8 @@
 # ☀️ Control de Paneles Solares
 
 Aplicación web para registrar el **consumo** y el **rendimiento** de una instalación de paneles solares.
-Es 100 % estática (HTML + CSS + JavaScript): no necesita servidor ni base de datos; los datos se guardan en el navegador (`localStorage`).
+Frontend estático (HTML + CSS + JavaScript) con base de datos en **Supabase**: los datos se comparten entre usuarios y dispositivos.
+El acceso requiere iniciar sesión (Supabase Auth).
 
 ## Funciones
 
@@ -15,8 +16,27 @@ Es 100 % estática (HTML + CSS + JavaScript): no necesita servidor ni base de da
 - **Registro** de lecturas diarias: kWh generados, kWh consumidos, horas de sol pico (HSP), clima y notas.
 - **Historial** con edición, eliminación, exportación e importación en **CSV**.
 - **Empresas**: alta, edición y baja de razones sociales (con ID fiscal) y sucursales (ubicación, paneles, W por panel, HSP); parámetros generales de tarifa, moneda y CO₂.
-- **Datos de ejemplo**: 2 razones sociales, 4 sucursales y 90 días de lecturas simuladas.
 - **CSV** con columnas `fecha,razon_social,sucursal,generada_kwh,consumida_kwh,hsp,clima,notas`; al importar se crean automáticamente las razones sociales y sucursales que no existan.
+
+## Base de datos (Supabase)
+
+Proyecto: `gk-control-operativo-entregas`. Tablas nuevas con prefijo `solar_` (no modifican las tablas existentes):
+
+| Tabla | Contenido |
+|---|---|
+| `solar_empresas` | Razones sociales (nombre único, ID fiscal) |
+| `solar_sucursales` | Sucursales por razón social: paneles, W por panel, HSP |
+| `solar_lecturas` | Lecturas diarias por sucursal: kWh generados/consumidos, HSP, clima, notas |
+| `solar_config` | Parámetros generales (tarifa, moneda, factor CO₂), una sola fila |
+
+- **RLS activado**: solo usuarios autenticados pueden leer y escribir; el rol `anon` no tiene acceso.
+- Borrar una razón social o sucursal elimina en cascada sus sucursales y lecturas.
+- El SQL está en [`supabase/migrations/`](supabase/migrations/).
+
+### Usuarios
+
+La app no tiene registro público. Para dar acceso, crea el usuario en el panel de Supabase:
+**Authentication → Users → Add user** (correo y contraseña). Los usuarios existentes del proyecto también pueden entrar.
 
 ## Cómo se calcula el rendimiento
 
@@ -31,7 +51,7 @@ Un PR saludable suele estar entre **75 % y 85 %**.
 
 ## Uso local
 
-Abre `index.html` en tu navegador, o sirve la carpeta:
+Sirve la carpeta con cualquier servidor estático:
 
 ```bash
 npx serve .
@@ -48,6 +68,6 @@ npx serve .
 ```
 index.html      Interfaz (Panel, Registro, Historial, Empresas)
 css/styles.css  Estilos, modo claro/oscuro y paletas de color
-js/app.js       Lógica, cálculos, gráficas y almacenamiento
-ejemplo.csv     Datos de muestra para importar
+js/app.js       Lógica, cálculos, gráficas y conexión a Supabase
+supabase/       Migraciones SQL
 ```
