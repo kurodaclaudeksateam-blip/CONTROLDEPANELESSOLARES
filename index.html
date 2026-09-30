@@ -1,9 +1,17 @@
 <!doctype html>
-<html lang="es">
+<html lang="es" data-accent="solar">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Control de Paneles Solares</title>
+  <script>
+    // Aplica el tema guardado antes de pintar para evitar parpadeo
+    try {
+      const p = JSON.parse(localStorage.getItem('solar_prefs')) || {};
+      if (p.tema && p.tema !== 'auto') document.documentElement.dataset.theme = p.tema;
+      document.documentElement.dataset.accent = p.acento || 'solar';
+    } catch (e) {}
+  </script>
   <link rel="stylesheet" href="css/styles.css">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
@@ -14,25 +22,42 @@
       <button class="tab active" data-view="dashboard">Panel</button>
       <button class="tab" data-view="registro">Registro</button>
       <button class="tab" data-view="historial">Historial</button>
-      <button class="tab" data-view="config">Sistema</button>
+      <button class="tab" data-view="empresas">Empresas</button>
     </nav>
+    <div class="theme-tools">
+      <button id="btnTema" class="icon-btn" title="Modo: automático">🖥️</button>
+      <details class="palette" id="palette">
+        <summary class="icon-btn" title="Color de la interfaz">🎨</summary>
+        <div class="swatches">
+          <button data-accent="solar" style="--sw:#f59e0b;--sw2:#f97316" title="Solar"></button>
+          <button data-accent="verde" style="--sw:#16a34a;--sw2:#0d9488" title="Verde"></button>
+          <button data-accent="azul" style="--sw:#2563eb;--sw2:#4f46e5" title="Azul"></button>
+          <button data-accent="morado" style="--sw:#9333ea;--sw2:#db2777" title="Morado"></button>
+          <button data-accent="rosa" style="--sw:#e11d48;--sw2:#f97316" title="Rosa"></button>
+          <button data-accent="turquesa" style="--sw:#0891b2;--sw2:#10b981" title="Turquesa"></button>
+        </div>
+      </details>
+    </div>
   </header>
 
   <main>
+    <!-- FILTROS (Panel e Historial) -->
+    <div id="filtros" class="card filters">
+      <label>Razón social <select id="fEmpresa"></select></label>
+      <label>Sucursal <select id="fSucursal"></select></label>
+      <label>Periodo
+        <select id="periodo">
+          <option value="7">Últimos 7 días</option>
+          <option value="30" selected>Últimos 30 días</option>
+          <option value="90">Últimos 90 días</option>
+          <option value="365">Último año</option>
+          <option value="0">Todo</option>
+        </select>
+      </label>
+    </div>
+
     <!-- DASHBOARD -->
     <section id="dashboard" class="view active">
-      <div class="filters">
-        <label>Periodo
-          <select id="periodo">
-            <option value="7">Últimos 7 días</option>
-            <option value="30" selected>Últimos 30 días</option>
-            <option value="90">Últimos 90 días</option>
-            <option value="365">Último año</option>
-            <option value="0">Todo</option>
-          </select>
-        </label>
-      </div>
-
       <div class="kpis">
         <div class="kpi"><p>Energía generada</p><strong id="kpiGen">0</strong><small>kWh</small></div>
         <div class="kpi"><p>Energía consumida</p><strong id="kpiCon">0</strong><small>kWh</small></div>
@@ -46,7 +71,23 @@
         <div class="card"><h3>Generación vs. consumo diario</h3><canvas id="chartDiario"></canvas></div>
         <div class="card"><h3>Rendimiento diario (PR %)</h3><canvas id="chartPR"></canvas></div>
       </div>
+      <div class="grid2">
+        <div class="card"><h3>Generación y consumo por sucursal</h3><canvas id="chartSucursal"></canvas></div>
+        <div class="card"><h3>Generación por razón social</h3><canvas id="chartEmpresa"></canvas></div>
+      </div>
       <div class="card"><h3>Balance mensual</h3><canvas id="chartMensual"></canvas></div>
+      <div class="card">
+        <h3>Comparativo por sucursal</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr>
+              <th>Sucursal</th><th>Razón social</th><th>kWp</th><th>Generada</th><th>Consumida</th>
+              <th>Autosuf.</th><th>PR</th><th>Ahorro</th>
+            </tr></thead>
+            <tbody id="tbodyComp"></tbody>
+          </table>
+        </div>
+      </div>
       <div id="alertas" class="card alerts"></div>
     </section>
 
@@ -54,18 +95,29 @@
     <section id="registro" class="view">
       <div class="card narrow">
         <h3 id="formTitle">Nueva lectura diaria</h3>
+        <p id="sinSucursales" class="notice" hidden>
+          Aún no hay sucursales. Registra una razón social y una sucursal en <a href="#" data-goto="empresas">Empresas</a>.
+        </p>
         <form id="formLectura">
           <input type="hidden" id="editId">
+          <div class="row2">
+            <label>Razón social <select id="regEmpresa" required></select></label>
+            <label>Sucursal <select id="regSucursal" required></select></label>
+          </div>
           <label>Fecha <input type="date" id="fecha" required></label>
-          <label>Energía generada (kWh) <input type="number" id="generada" step="0.01" min="0" required></label>
-          <label>Energía consumida (kWh) <input type="number" id="consumida" step="0.01" min="0" required></label>
-          <label>Horas de sol pico (HSP) <input type="number" id="hsp" step="0.1" min="0" placeholder="Ej. 5.2"></label>
-          <label>Clima
-            <select id="clima">
-              <option>Soleado</option><option>Parcialmente nublado</option>
-              <option>Nublado</option><option>Lluvioso</option>
-            </select>
-          </label>
+          <div class="row2">
+            <label>Energía generada (kWh) <input type="number" id="generada" step="0.01" min="0" required></label>
+            <label>Energía consumida (kWh) <input type="number" id="consumida" step="0.01" min="0" required></label>
+          </div>
+          <div class="row2">
+            <label>Horas de sol pico (HSP) <input type="number" id="hsp" step="0.1" min="0" placeholder="Vacío = HSP de la sucursal"></label>
+            <label>Clima
+              <select id="clima">
+                <option>Soleado</option><option>Parcialmente nublado</option>
+                <option>Nublado</option><option>Lluvioso</option>
+              </select>
+            </label>
+          </div>
           <label>Notas <textarea id="notas" rows="2" placeholder="Limpieza de paneles, fallas, etc."></textarea></label>
           <div class="actions">
             <button type="submit" class="btn primary">Guardar</button>
@@ -79,7 +131,7 @@
     <section id="historial" class="view">
       <div class="card">
         <div class="row-between">
-          <h3>Historial de lecturas</h3>
+          <h3>Historial de lecturas <span id="histCount" class="muted"></span></h3>
           <div class="actions">
             <button class="btn" id="btnExport">Exportar CSV</button>
             <label class="btn">Importar CSV <input type="file" id="fileImport" accept=".csv" hidden></label>
@@ -88,8 +140,8 @@
         <div class="table-wrap">
           <table>
             <thead><tr>
-              <th>Fecha</th><th>Generada</th><th>Consumida</th><th>Balance</th>
-              <th>HSP</th><th>PR</th><th>Clima</th><th>Notas</th><th></th>
+              <th>Fecha</th><th>Razón social</th><th>Sucursal</th><th>Generada</th><th>Consumida</th>
+              <th>Balance</th><th>HSP</th><th>PR</th><th>Clima</th><th>Notas</th><th></th>
             </tr></thead>
             <tbody id="tbody"></tbody>
           </table>
@@ -97,21 +149,74 @@
       </div>
     </section>
 
-    <!-- CONFIG -->
-    <section id="config" class="view">
+    <!-- EMPRESAS -->
+    <section id="empresas" class="view">
+      <div class="grid2">
+        <div class="card">
+          <h3 id="empTitle">Nueva razón social</h3>
+          <form id="formEmpresa">
+            <input type="hidden" id="empId">
+            <label>Razón social <input type="text" id="empNombre" required placeholder="Ej. Energía Verde S.A. de C.V."></label>
+            <label>RFC / NIT / ID fiscal <input type="text" id="empRfc"></label>
+            <div class="actions">
+              <button type="submit" class="btn primary">Guardar</button>
+              <button type="button" class="btn" id="empCancel" hidden>Cancelar</button>
+            </div>
+          </form>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Razón social</th><th>ID fiscal</th><th>Sucursales</th><th></th></tr></thead>
+              <tbody id="tbodyEmp"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3 id="sucTitle">Nueva sucursal</h3>
+          <form id="formSucursal">
+            <input type="hidden" id="sucId">
+            <label>Razón social <select id="sucEmpresa" required></select></label>
+            <div class="row2">
+              <label>Nombre de la sucursal <input type="text" id="sucNombre" required></label>
+              <label>Ubicación <input type="text" id="sucUbicacion" placeholder="Ciudad, estado"></label>
+            </div>
+            <div class="row3">
+              <label>N.º de paneles <input type="number" id="sucPaneles" min="1" required value="10"></label>
+              <label>W por panel <input type="number" id="sucWatts" min="1" required value="450"></label>
+              <label>HSP de la zona <input type="number" id="sucHsp" step="0.1" min="0" required value="5"></label>
+            </div>
+            <p class="hint">Potencia instalada: <b id="sucKwp">4.5</b> kWp</p>
+            <div class="actions">
+              <button type="submit" class="btn primary">Guardar</button>
+              <button type="button" class="btn" id="sucCancel" hidden>Cancelar</button>
+            </div>
+          </form>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Sucursales registradas</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr>
+              <th>Sucursal</th><th>Razón social</th><th>Ubicación</th><th>Paneles</th><th>W</th>
+              <th>kWp</th><th>HSP</th><th>Lecturas</th><th></th>
+            </tr></thead>
+            <tbody id="tbodySuc"></tbody>
+          </table>
+        </div>
+      </div>
+
       <div class="card narrow">
-        <h3>Datos del sistema fotovoltaico</h3>
+        <h3>Parámetros generales</h3>
         <form id="formConfig">
-          <label>Nombre de la instalación <input type="text" id="cfgNombre"></label>
-          <label>Número de paneles <input type="number" id="cfgPaneles" min="1"></label>
-          <label>Potencia por panel (W) <input type="number" id="cfgWatts" min="1"></label>
-          <label>HSP promedio de la zona <input type="number" id="cfgHsp" step="0.1" min="0"></label>
-          <label>Tarifa eléctrica (por kWh) <input type="number" id="cfgTarifa" step="0.001" min="0"></label>
-          <label>Moneda <input type="text" id="cfgMoneda" maxlength="5"></label>
-          <label>Factor CO₂ (kg/kWh) <input type="number" id="cfgCO2" step="0.01" min="0"></label>
-          <p class="hint">Potencia instalada: <b id="cfgKwp">0</b> kWp</p>
+          <div class="row3">
+            <label>Tarifa (por kWh) <input type="number" id="cfgTarifa" step="0.001" min="0"></label>
+            <label>Moneda <input type="text" id="cfgMoneda" maxlength="5"></label>
+            <label>CO₂ (kg/kWh) <input type="number" id="cfgCO2" step="0.01" min="0"></label>
+          </div>
           <div class="actions">
-            <button type="submit" class="btn primary">Guardar configuración</button>
+            <button type="submit" class="btn primary">Guardar</button>
             <button type="button" class="btn" id="btnDemo">Cargar datos de ejemplo</button>
             <button type="button" class="btn danger" id="btnReset">Borrar todos los datos</button>
           </div>
